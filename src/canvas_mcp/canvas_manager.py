@@ -1,6 +1,7 @@
 """Canvas Manager - Surface lifecycle management."""
 
 import json
+import socket
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,31 @@ import aiofiles
 from loguru import logger
 
 from canvas_mcp.models import CanvasConfig, CanvasSize, CanvasSizePreset, Surface, SurfaceState
+
+
+def get_local_ip() -> str:
+    """
+    Get the primary local IP address of this machine.
+    
+    This uses a UDP socket trick to find the IP that would be used
+    to reach external addresses (without actually sending data).
+    """
+    try:
+        # Create a UDP socket (doesn't actually connect)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.1)
+        # Connect to a known external IP (Google DNS) - no data is sent
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        # Fallback: try to get from hostname
+        try:
+            hostname = socket.gethostname()
+            return socket.gethostbyname(hostname)
+        except Exception:
+            return "localhost"
 
 
 class CanvasManager:
@@ -88,9 +114,20 @@ class CanvasManager:
         return uuid.uuid4().hex[:12]
 
     def _get_surface_urls(self, surface_id: str) -> tuple[str, str]:
-        """Get the local HTTP and WebSocket URLs for a surface."""
-        # Use 0.0.0.0 -> localhost for local access, but keep original for network
-        display_host = "localhost" if self.config.host == "0.0.0.0" else self.config.host
+        """Get the HTTP and WebSocket URLs for a surface.
+        
+        Uses external_host from config if set, otherwise auto-detects the
+        local network IP for external clients (like Chromecast) to connect.
+        """
+        if self.config.external_host:
+            # Use explicitly configured external host
+            display_host = self.config.external_host
+        elif self.config.host == "0.0.0.0":
+            # Auto-detect network IP for external access
+            display_host = get_local_ip()
+        else:
+            display_host = self.config.host
+        
         display_base = f"{display_host}:{self.config.port}"
 
         local_url = f"http://{display_base}/canvas/{surface_id}"

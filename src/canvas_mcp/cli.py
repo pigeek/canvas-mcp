@@ -41,6 +41,11 @@ def setup_logging(verbose: bool = False) -> None:
     help="Port for the web server",
 )
 @click.option(
+    "--external-host",
+    default=None,
+    help="External hostname/IP for URLs (auto-detected if not specified)",
+)
+@click.option(
     "--persistence-path",
     default="~/.canvas-mcp/surfaces/",
     help="Path to store canvas state",
@@ -67,6 +72,18 @@ def setup_logging(verbose: bool = False) -> None:
     help="Default canvas size preset for new surfaces",
 )
 @click.option(
+    "--transport",
+    default="stdio",
+    type=click.Choice(["stdio", "sse"], case_sensitive=False),
+    help="MCP transport type (stdio for local, sse for remote)",
+)
+@click.option(
+    "--mcp-port",
+    default=3001,
+    type=int,
+    help="Port for SSE MCP endpoint (only used with --transport=sse)",
+)
+@click.option(
     "-v", "--verbose",
     is_flag=True,
     help="Enable verbose logging",
@@ -74,11 +91,14 @@ def setup_logging(verbose: bool = False) -> None:
 def main(
     host: str,
     port: int,
+    external_host: str | None,
     persistence_path: str,
     no_persistence: bool,
     receiver_url: str | None,
     cast_app_id: str | None,
     default_size: str,
+    transport: str,
+    mcp_port: int,
     verbose: bool,
 ) -> None:
     """Canvas MCP Server - A2UI rendering for AI agents.
@@ -106,6 +126,7 @@ def main(
     config = CanvasConfig(
         host=host,
         port=port,
+        external_host=external_host,
         persistence_enabled=not no_persistence,
         persistence_path=persistence_path,
         default_size=CanvasSize.from_preset(default_size),
@@ -114,9 +135,13 @@ def main(
     )
 
     logger.info(f"Starting Canvas MCP Server on {host}:{port} (default size: {default_size})")
+    if transport == "sse":
+        logger.info(f"MCP transport: SSE on port {mcp_port}")
+    else:
+        logger.info("MCP transport: stdio")
 
     try:
-        asyncio.run(run_server(config))
+        asyncio.run(run_server(config, transport=transport, mcp_port=mcp_port))
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:

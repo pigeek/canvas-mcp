@@ -6,13 +6,13 @@ from typing import Any, Sequence
 from loguru import logger
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from mcp.server.sse import SseServerTransport
 from mcp.types import (
     Resource,
     ResourceTemplate,
     TextContent,
     Tool,
 )
-
 from canvas_mcp.canvas_manager import CanvasManager
 from canvas_mcp.models import CanvasConfig
 from canvas_mcp.web_server import CanvasWebServer
@@ -338,8 +338,81 @@ class CanvasMCPServer:
             await self.web_server.stop()
             logger.info("Canvas MCP Server stopped")
 
+    async def run_sse(self, mcp_port: int = 3001) -> None:
+        """Run the MCP server using SSE transport.
 
-async def run_server(config: CanvasConfig) -> None:
-    """Run the Canvas MCP Server."""
+        Args:
+            mcp_port: Port for the SSE MCP endpoint (separate from canvas web server)
+        """
+        import uvicorn
+
+        # Initialize canvas manager
+        await self.canvas_manager.initialize()
+
+        # Start web server in background (for canvas rendering)
+        await self.web_server.start()
+
+        logger.info(f"Canvas MCP Server (SSE) starting on port {mcp_port}...")
+
+        # Create SSE transport
+        sse_transport = SseServerTransport("/messages/")
+
+        # Create raw ASGI handlers for SSE
+        async def handle_sse(scope, receive, send):
+            async with sse_transport.connect_sse(scope, receive, send) as streams:
+                await self.server.run(
+                    streams[0],
+                    streams[1],
+                    self.server.create_initialization_options(),
+                )
+
+        async def handle_messages(scope, receive, send):
+            await sse_transport.handle_post_message(scope, receive, send)
+
+        # Create ASGI app that routes based on path
+        async def app(scope, receive, send):
+            if scope["type"] == "http":
+                path = scope["path"]
+                if path == "/sse" and scope["method"] == "GET":
+                    await handle_sse(scope, receive, send)
+                elif path == "/messages/" and scope["method"] == "POST":
+                    await handle_messages(scope, receive, send)
+                else:
+                    await send({"type": "http.response.start", "status": 404, "headers": []})
+                    await send({"type": "http.response.body", "body": b"Not Found"})
+            elif scope["type"] == "lifespan":
+                while True:
+                    message = await receive()
+                    if message["type"] == "lifespan.startup":
+                        await send({"type": "lifespan.startup.complete"})
+                    elif message["type"] == "lifespan.shutdown":
+                        await send({"type": "lifespan.shutdown.complete"})
+                        return
+
+        try:
+            config = uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=mcp_port,
+                log_level="info",
+            )
+            server = uvicorn.Server(config)
+            await server.serve()
+        finally:
+            await self.web_server.stop()
+            logger.info("Canvas MCP Server stopped")
+
+
+async def run_server(config: CanvasConfig, transport: str = "stdio", mcp_port: int = 3001) -> None:
+    """Run the Canvas MCP Server.
+
+    Args:
+        config: Server configuration
+        transport: Transport type ("stdio" or "sse")
+        mcp_port: Port for SSE MCP endpoint (only used if transport="sse")
+    """
     server = CanvasMCPServer(config)
-    await server.run_stdio()
+    if transport == "sse":
+        await server.run_sse(mcp_port)
+    else:
+        await server.run_stdio()

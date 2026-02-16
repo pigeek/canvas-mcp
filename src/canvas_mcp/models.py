@@ -138,6 +138,10 @@ class CanvasConfig(BaseModel):
     persistence_enabled: bool = True
     persistence_path: str = "~/.canvas-mcp/surfaces/"
 
+    # External host for URLs - if None, auto-detect network IP
+    # This is the IP/hostname that external clients (like Chromecast) will use
+    external_host: str | None = None
+
     # Default canvas size (TV 1080p for casting use case)
     default_size: CanvasSize = Field(
         default_factory=lambda: CanvasSize.from_preset(CanvasSizePreset.TV_1080P)
