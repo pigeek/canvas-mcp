@@ -145,7 +145,7 @@ class CanvasMCPServer:
                 ),
                 Tool(
                     name="canvas_show",
-                    description="Navigate to and get a surface for a device. Returns surface info for casting. Use this instead of specifying surface IDs directly.",
+                    description="Navigate to a surface for a device. Returns surface info (ws_url, surface_id). IMPORTANT: After calling this tool, you MUST call atv_cast_url to actually display the surface on the TV. This tool only selects the surface - it does not cast it.",
                     inputSchema={
                         "type": "object",
                         "properties": {
