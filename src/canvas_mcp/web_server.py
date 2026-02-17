@@ -16,6 +16,9 @@ if TYPE_CHECKING:
 STATIC_PATH = Path(__file__).parent / "static"
 
 
+WEBSOCKET_PING_INTERVAL = 30  # seconds between pings
+
+
 class CanvasWebServer:
     """
     HTTP and WebSocket server for canvas rendering.
@@ -33,6 +36,8 @@ class CanvasWebServer:
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+        self._ping_task: asyncio.Task | None = None
+        self._ws_clients: set[web.WebSocketResponse] = set()
 
     def _create_app(self) -> web.Application:
         """Create the aiohttp application."""
@@ -62,15 +67,49 @@ class CanvasWebServer:
         )
         await self._site.start()
 
+        # Start WebSocket ping task for keep-alive
+        self._ping_task = asyncio.create_task(self._ping_websockets())
+
         logger.info(f"Canvas Web Server started on http://{self.config.host}:{self.config.port}")
 
     async def stop(self) -> None:
         """Stop the web server."""
+        if self._ping_task:
+            self._ping_task.cancel()
+            try:
+                await self._ping_task
+            except asyncio.CancelledError:
+                pass
         if self._site:
             await self._site.stop()
         if self._runner:
             await self._runner.cleanup()
         logger.info("Canvas Web Server stopped")
+
+    async def _ping_websockets(self) -> None:
+        """Periodically ping all connected WebSocket clients to keep connections alive."""
+        while True:
+            try:
+                await asyncio.sleep(WEBSOCKET_PING_INTERVAL)
+                if self._ws_clients:
+                    logger.debug(f"Pinging {len(self._ws_clients)} WebSocket clients")
+                    dead_clients = []
+                    for ws in self._ws_clients:
+                        try:
+                            if not ws.closed:
+                                await ws.ping()
+                            else:
+                                dead_clients.append(ws)
+                        except Exception as e:
+                            logger.debug(f"Failed to ping client: {e}")
+                            dead_clients.append(ws)
+                    # Remove dead clients
+                    for ws in dead_clients:
+                        self._ws_clients.discard(ws)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in ping task: {e}")
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         """Health check endpoint."""
@@ -93,7 +132,7 @@ class CanvasWebServer:
         """Handle WebSocket connections for real-time updates."""
         surface_id = request.match_info["surface_id"]
 
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(heartbeat=WEBSOCKET_PING_INTERVAL)
         await ws.prepare(request)
 
         # Register client
@@ -101,6 +140,8 @@ class CanvasWebServer:
             await ws.close(code=4004, message=b"Surface not found")
             return ws
 
+        # Track client for keep-alive pings
+        self._ws_clients.add(ws)
         logger.info(f"WebSocket connected to surface {surface_id}")
 
         try:
@@ -121,6 +162,7 @@ class CanvasWebServer:
         except Exception as e:
             logger.error(f"WebSocket error: {e}")
         finally:
+            self._ws_clients.discard(ws)
             self.canvas_manager.unregister_ws_client(surface_id, ws)
             logger.info(f"WebSocket disconnected from surface {surface_id}")
 

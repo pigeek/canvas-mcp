@@ -54,6 +54,10 @@ class CanvasMCPServer:
                                 "type": "string",
                                 "description": "Optional friendly name for the canvas",
                             },
+                            "device_id": {
+                                "type": "string",
+                                "description": "Device ID (TV) to associate with this surface. Use device name like 'Master Bedroom TV'",
+                            },
                         },
                         "required": [],
                     },
@@ -127,11 +131,36 @@ class CanvasMCPServer:
                 ),
                 Tool(
                     name="canvas_list",
-                    description="List all canvas surfaces",
+                    description="List all canvas surfaces, optionally filtered by device",
                     inputSchema={
                         "type": "object",
-                        "properties": {},
+                        "properties": {
+                            "device_id": {
+                                "type": "string",
+                                "description": "Optional device ID to filter surfaces by",
+                            },
+                        },
                         "required": [],
+                    },
+                ),
+                Tool(
+                    name="canvas_show",
+                    description="Navigate to and get a surface for a device. Returns surface info for casting. Use this instead of specifying surface IDs directly.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "device_id": {
+                                "type": "string",
+                                "description": "Device ID (TV) to show surface on. Use device name like 'Master Bedroom TV'",
+                            },
+                            "navigation": {
+                                "type": "string",
+                                "enum": ["current", "previous", "next", "latest"],
+                                "description": "Which surface to show: 'current' (default), 'previous', 'next', or 'latest'",
+                                "default": "current",
+                            },
+                        },
+                        "required": ["device_id"],
                     },
                 ),
                 Tool(
@@ -164,12 +193,14 @@ class CanvasMCPServer:
 
         if name == "canvas_create":
             surface = await self.canvas_manager.create_surface(
-                name=arguments.get("name")
+                name=arguments.get("name"),
+                device_id=arguments.get("device_id"),
             )
             return {
                 "success": True,
                 "surface_id": surface.surface_id,
                 "name": surface.name,
+                "device_id": surface.device_id,
                 "local_url": surface.local_url,
                 "ws_url": surface.ws_url,
             }
@@ -204,7 +235,9 @@ class CanvasMCPServer:
             }
 
         elif name == "canvas_list":
-            surfaces = self.canvas_manager.list_surfaces()
+            surfaces = self.canvas_manager.list_surfaces(
+                device_id=arguments.get("device_id")
+            )
             return {
                 "success": True,
                 "count": len(surfaces),
@@ -212,6 +245,7 @@ class CanvasMCPServer:
                     {
                         "surface_id": s.surface_id,
                         "name": s.name,
+                        "device_id": s.device_id,
                         "local_url": s.local_url,
                         "ws_url": s.ws_url,
                         "created_at": s.created_at.isoformat(),
@@ -219,6 +253,31 @@ class CanvasMCPServer:
                     }
                     for s in surfaces
                 ],
+            }
+
+        elif name == "canvas_show":
+            device_id = arguments["device_id"]
+            navigation = arguments.get("navigation", "current")
+
+            if navigation == "current":
+                surface = self.canvas_manager.get_current_surface(device_id)
+            else:
+                surface = await self.canvas_manager.navigate_surface(device_id, navigation)
+
+            if not surface:
+                return {
+                    "success": False,
+                    "error": f"No surface found for device {device_id} (navigation={navigation})",
+                }
+
+            return {
+                "success": True,
+                "surface_id": surface.surface_id,
+                "name": surface.name,
+                "device_id": surface.device_id,
+                "local_url": surface.local_url,
+                "ws_url": surface.ws_url,
+                "navigation": navigation,
             }
 
         elif name == "canvas_get":
@@ -231,6 +290,7 @@ class CanvasMCPServer:
                 "success": True,
                 "surface_id": state.surface_id,
                 "name": state.name,
+                "device_id": state.device_id,
                 "components": state.components,
                 "data_model": state.data_model,
                 "created_at": state.created_at.isoformat(),
@@ -297,6 +357,7 @@ class CanvasMCPServer:
                 return json.dumps({
                     "surface_id": state.surface_id,
                     "name": state.name,
+                    "device_id": state.device_id,
                     "components": state.components,
                     "data_model": state.data_model,
                     "created_at": state.created_at.isoformat(),

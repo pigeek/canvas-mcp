@@ -53,7 +53,9 @@ class CanvasManager:
         self.config = config
         self._surfaces: dict[str, SurfaceState] = {}
         self._ws_clients: dict[str, set[Any]] = {}  # surface_id -> set of websocket connections
+        self._device_cursors: dict[str, str] = {}  # device_id -> current surface_id
         self._persistence_path = Path(config.persistence_path).expanduser()
+        self._cursors_file = self._persistence_path / "_device_cursors.json"
 
         if config.persistence_enabled:
             self._persistence_path.mkdir(parents=True, exist_ok=True)
@@ -62,6 +64,7 @@ class CanvasManager:
         """Initialize manager, load persisted surfaces."""
         if self.config.persistence_enabled:
             await self._load_persisted_surfaces()
+            await self._load_device_cursors()
         logger.info(f"Canvas Manager initialized with {len(self._surfaces)} surfaces")
 
     async def _load_persisted_surfaces(self) -> None:
@@ -70,6 +73,9 @@ class CanvasManager:
             return
 
         for file_path in self._persistence_path.glob("*.json"):
+            # Skip the cursors file
+            if file_path.name.startswith("_"):
+                continue
             try:
                 async with aiofiles.open(file_path, "r") as f:
                     data = json.loads(await f.read())
@@ -78,6 +84,36 @@ class CanvasManager:
                     logger.debug(f"Loaded surface: {state.surface_id}")
             except Exception as e:
                 logger.error(f"Failed to load surface from {file_path}: {e}")
+
+    async def _load_device_cursors(self) -> None:
+        """Load device cursors from persistence."""
+        if not self._cursors_file.exists():
+            return
+
+        try:
+            async with aiofiles.open(self._cursors_file, "r") as f:
+                self._device_cursors = json.loads(await f.read())
+                # Clean up cursors pointing to non-existent surfaces
+                self._device_cursors = {
+                    device_id: surface_id
+                    for device_id, surface_id in self._device_cursors.items()
+                    if surface_id in self._surfaces
+                }
+                logger.debug(f"Loaded {len(self._device_cursors)} device cursors")
+        except Exception as e:
+            logger.error(f"Failed to load device cursors: {e}")
+
+    async def _persist_device_cursors(self) -> None:
+        """Persist device cursors to disk."""
+        if not self.config.persistence_enabled:
+            return
+
+        try:
+            async with aiofiles.open(self._cursors_file, "w") as f:
+                await f.write(json.dumps(self._device_cursors, indent=2))
+            logger.debug("Persisted device cursors")
+        except Exception as e:
+            logger.error(f"Failed to persist device cursors: {e}")
 
     async def _persist_surface(self, surface_id: str) -> None:
         """Persist a surface to disk."""
@@ -110,8 +146,14 @@ class CanvasManager:
             logger.error(f"Failed to delete persisted surface {surface_id}: {e}")
 
     def _generate_surface_id(self) -> str:
-        """Generate a unique surface ID."""
-        return uuid.uuid4().hex[:12]
+        """Generate a unique, timestamp-based surface ID.
+
+        Format: YYYYMMDD-HHMMSS-XXXX where XXXX is a random suffix.
+        This makes IDs sortable by creation time.
+        """
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        random_suffix = uuid.uuid4().hex[:4]
+        return f"{timestamp}-{random_suffix}"
 
     def _get_surface_urls(self, surface_id: str) -> tuple[str, str]:
         """Get the HTTP and WebSocket URLs for a surface.
@@ -138,6 +180,7 @@ class CanvasManager:
         self,
         name: str | None = None,
         size: CanvasSize | CanvasSizePreset | str | None = None,
+        device_id: str | None = None,
     ) -> Surface:
         """
         Create a new canvas surface.
@@ -146,6 +189,7 @@ class CanvasManager:
             name: Optional friendly name for the surface
             size: Canvas size - can be a CanvasSize object, a preset name (e.g., "tv_1080p"),
                   or None to use the default from config
+            device_id: Optional device ID to associate with this surface
 
         Returns:
             Surface object with URLs for access
@@ -166,6 +210,7 @@ class CanvasManager:
         state = SurfaceState(
             surface_id=surface_id,
             name=name,
+            device_id=device_id,
             size=canvas_size,
             created_at=datetime.now(),
             updated_at=datetime.now(),
@@ -173,12 +218,18 @@ class CanvasManager:
         self._surfaces[surface_id] = state
         self._ws_clients[surface_id] = set()
 
+        # Update device cursor to point to this new surface
+        if device_id:
+            self._device_cursors[device_id] = surface_id
+            await self._persist_device_cursors()
+
         await self._persist_surface(surface_id)
 
-        logger.info(f"Created surface: {surface_id} (name={name}, size={canvas_size.preset.value})")
+        logger.info(f"Created surface: {surface_id} (name={name}, device={device_id}, size={canvas_size.preset.value})")
         return Surface(
             surface_id=surface_id,
             name=name,
+            device_id=device_id,
             size=canvas_size,
             local_url=local_url,
             ws_url=ws_url,
@@ -200,6 +251,10 @@ class CanvasManager:
         state = self._surfaces.get(surface_id)
         if not state:
             raise ValueError(f"Surface not found: {surface_id}")
+
+        # Auto-wrap components in a root Column if no root component provided
+        # This is required for the receiver to render content
+        components = self._ensure_root_component(components)
 
         state.components = components
         state.updated_at = datetime.now()
@@ -299,20 +354,33 @@ class CanvasManager:
         logger.info(f"Closed surface: {surface_id}")
         return True
 
-    def list_surfaces(self) -> list[Surface]:
-        """List all surfaces."""
+    def list_surfaces(self, device_id: str | None = None) -> list[Surface]:
+        """List all surfaces, optionally filtered by device.
+
+        Args:
+            device_id: Optional device ID to filter by
+
+        Returns:
+            List of surfaces sorted by creation time (oldest first)
+        """
         surfaces = []
         for state in self._surfaces.values():
+            # Filter by device if specified
+            if device_id is not None and state.device_id != device_id:
+                continue
             local_url, ws_url = self._get_surface_urls(state.surface_id)
             surfaces.append(Surface(
                 surface_id=state.surface_id,
                 name=state.name,
+                device_id=state.device_id,
                 size=state.size,
                 local_url=local_url,
                 ws_url=ws_url,
                 created_at=state.created_at,
                 connected_clients=len(self._ws_clients.get(state.surface_id, set())),
             ))
+        # Sort by surface_id (timestamp-based, so chronological)
+        surfaces.sort(key=lambda s: s.surface_id)
         return surfaces
 
     def get_surface(self, surface_id: str) -> SurfaceState | None:
@@ -329,12 +397,125 @@ class CanvasManager:
         return Surface(
             surface_id=state.surface_id,
             name=state.name,
+            device_id=state.device_id,
             size=state.size,
             local_url=local_url,
             ws_url=ws_url,
             created_at=state.created_at,
             connected_clients=len(self._ws_clients.get(surface_id, set())),
         )
+
+    # Device and navigation management
+
+    def get_surfaces_for_device(self, device_id: str) -> list[Surface]:
+        """Get all surfaces for a device, sorted by creation time (oldest first)."""
+        surfaces = []
+        for state in self._surfaces.values():
+            if state.device_id == device_id:
+                local_url, ws_url = self._get_surface_urls(state.surface_id)
+                surfaces.append(Surface(
+                    surface_id=state.surface_id,
+                    name=state.name,
+                    device_id=state.device_id,
+                    size=state.size,
+                    local_url=local_url,
+                    ws_url=ws_url,
+                    created_at=state.created_at,
+                    connected_clients=len(self._ws_clients.get(state.surface_id, set())),
+                ))
+        # Sort by surface_id (which is timestamp-based, so this gives chronological order)
+        surfaces.sort(key=lambda s: s.surface_id)
+        return surfaces
+
+    def get_current_surface(self, device_id: str) -> Surface | None:
+        """Get the current surface for a device."""
+        surface_id = self._device_cursors.get(device_id)
+        if not surface_id:
+            # No cursor set - return latest for this device
+            surfaces = self.get_surfaces_for_device(device_id)
+            return surfaces[-1] if surfaces else None
+        return self.get_surface_info(surface_id)
+
+    async def navigate_surface(
+        self, device_id: str, direction: str
+    ) -> Surface | None:
+        """
+        Navigate to a different surface for a device.
+
+        Args:
+            device_id: The device to navigate
+            direction: One of "previous", "next", "latest"
+
+        Returns:
+            The new current surface, or None if navigation not possible
+        """
+        surfaces = self.get_surfaces_for_device(device_id)
+        if not surfaces:
+            logger.warning(f"No surfaces found for device {device_id}")
+            return None
+
+        current_surface_id = self._device_cursors.get(device_id)
+
+        if direction == "latest":
+            new_surface = surfaces[-1]
+        elif direction == "previous":
+            if not current_surface_id:
+                # No cursor - can't go previous from nothing
+                return None
+            # Find current position
+            current_idx = next(
+                (i for i, s in enumerate(surfaces) if s.surface_id == current_surface_id),
+                None
+            )
+            if current_idx is None or current_idx == 0:
+                # Already at oldest
+                logger.debug(f"Already at oldest surface for device {device_id}")
+                return None
+            new_surface = surfaces[current_idx - 1]
+        elif direction == "next":
+            if not current_surface_id:
+                # No cursor - start at latest
+                new_surface = surfaces[-1]
+            else:
+                # Find current position
+                current_idx = next(
+                    (i for i, s in enumerate(surfaces) if s.surface_id == current_surface_id),
+                    None
+                )
+                if current_idx is None or current_idx >= len(surfaces) - 1:
+                    # Already at newest
+                    logger.debug(f"Already at newest surface for device {device_id}")
+                    return None
+                new_surface = surfaces[current_idx + 1]
+        else:
+            raise ValueError(f"Invalid direction: {direction}. Use 'previous', 'next', or 'latest'")
+
+        # Update cursor
+        self._device_cursors[device_id] = new_surface.surface_id
+        await self._persist_device_cursors()
+
+        logger.info(f"Navigated device {device_id} to surface {new_surface.surface_id} ({direction})")
+        return new_surface
+
+    async def set_device_cursor(self, device_id: str, surface_id: str) -> bool:
+        """
+        Set the current surface for a device.
+
+        Args:
+            device_id: The device to update
+            surface_id: The surface to set as current
+
+        Returns:
+            True if successful
+        """
+        if surface_id not in self._surfaces:
+            raise ValueError(f"Surface not found: {surface_id}")
+
+        self._device_cursors[device_id] = surface_id
+        await self._persist_device_cursors()
+
+        logger.info(f"Set device {device_id} cursor to surface {surface_id}")
+        return True
 
     # WebSocket client management
 
@@ -397,6 +578,44 @@ class CanvasManager:
                     "path": path,
                     "value": value,
                 }))
+
+    def _ensure_root_component(
+        self, components: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """
+        Ensure components have a root component.
+
+        The receiver requires a component with id="root" to start rendering.
+        If no root component exists, wrap all components in a root Column.
+
+        Args:
+            components: List of A2UI component definitions
+
+        Returns:
+            Components list with a guaranteed root component
+        """
+        # Check if root already exists
+        has_root = any(c.get("id") == "root" for c in components)
+        if has_root:
+            return components
+
+        # No root - wrap components in a centered Column
+        child_ids = [c.get("id") for c in components if c.get("id")]
+
+        root_component = {
+            "id": "root",
+            "component": "Column",
+            "children": child_ids,
+            "style": {
+                "justifyContent": "center",
+                "alignItems": "center",
+                "height": "100%",
+                "width": "100%",
+            },
+        }
+
+        logger.debug(f"Auto-wrapped {len(components)} components in root Column")
+        return [root_component] + components
 
     def _flatten_data_model(
         self, obj: dict, prefix: str = ""

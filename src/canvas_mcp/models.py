@@ -96,6 +96,7 @@ class SurfaceState(BaseModel):
     """Persisted state of a canvas surface."""
     surface_id: str
     name: str | None = None
+    device_id: str | None = None  # Associated device (TV) for this surface
     size: CanvasSize = Field(default_factory=lambda: CanvasSize.from_preset(CanvasSizePreset.AUTO))
     components: list[dict[str, Any]] = Field(default_factory=list)
     data_model: dict[str, Any] = Field(default_factory=dict)
@@ -122,6 +123,7 @@ class Surface(BaseModel):
     """A canvas surface with connection info."""
     surface_id: str
     name: str | None = None
+    device_id: str | None = None  # Associated device (TV) for this surface
     size: CanvasSize = Field(default_factory=lambda: CanvasSize.from_preset(CanvasSizePreset.AUTO))
     local_url: str  # URL to access the canvas locally (HTTP)
     ws_url: str  # WebSocket URL for real-time updates
