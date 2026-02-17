@@ -55,7 +55,11 @@ class CanvasWebServer:
         return app
 
     async def start(self) -> None:
-        """Start the web server."""
+        """Start the web server.
+
+        If the port is already in use (another canvas-mcp instance is running),
+        the web server will not start but the MCP server will continue to work.
+        """
         self._app = self._create_app()
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -65,26 +69,41 @@ class CanvasWebServer:
             self.config.host,
             self.config.port,
         )
-        await self._site.start()
 
-        # Start WebSocket ping task for keep-alive
-        self._ping_task = asyncio.create_task(self._ping_websockets())
-
-        logger.info(f"Canvas Web Server started on http://{self.config.host}:{self.config.port}")
+        try:
+            await self._site.start()
+            # Start WebSocket ping task for keep-alive
+            self._ping_task = asyncio.create_task(self._ping_websockets())
+            logger.info(f"Canvas Web Server started on http://{self.config.host}:{self.config.port}")
+        except OSError as e:
+            if e.errno == 98:  # Address already in use
+                logger.warning(
+                    f"Port {self.config.port} already in use - another canvas-mcp instance is running. "
+                    f"Continuing without web server (will use existing instance)."
+                )
+                # Clean up the failed runner
+                await self._runner.cleanup()
+                self._runner = None
+                self._site = None
+            else:
+                raise
 
     async def stop(self) -> None:
-        """Stop the web server."""
+        """Stop the web server (if it was started)."""
         if self._ping_task:
             self._ping_task.cancel()
             try:
                 await self._ping_task
             except asyncio.CancelledError:
                 pass
+            self._ping_task = None
         if self._site:
             await self._site.stop()
+            self._site = None
         if self._runner:
             await self._runner.cleanup()
-        logger.info("Canvas Web Server stopped")
+            self._runner = None
+            logger.info("Canvas Web Server stopped")
 
     async def _ping_websockets(self) -> None:
         """Periodically ping all connected WebSocket clients to keep connections alive."""

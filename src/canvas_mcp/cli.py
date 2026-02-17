@@ -144,9 +144,6 @@ def main(
         asyncio.run(run_server(config, transport=transport, mcp_port=mcp_port))
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
-    except Exception as e:
-        logger.error(f"Server error: {e}")
-        sys.exit(1)
 
 
 if __name__ == "__main__":
