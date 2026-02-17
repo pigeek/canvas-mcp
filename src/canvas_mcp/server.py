@@ -46,7 +46,7 @@ class CanvasMCPServer:
             return [
                 Tool(
                     name="canvas_create",
-                    description="Create a new canvas surface for A2UI visualization",
+                    description="Create a NEW canvas surface with NEW content. Only use this when you need to render NEW visualizations (charts, dashboards, etc). Do NOT use this to show existing surfaces - use canvas_show instead.",
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -145,7 +145,7 @@ class CanvasMCPServer:
                 ),
                 Tool(
                     name="canvas_show",
-                    description="Navigate to a surface for a device. Returns surface info (ws_url, surface_id). IMPORTANT: After calling this tool, you MUST call atv_cast_url to actually display the surface on the TV. This tool only selects the surface - it does not cast it.",
+                    description="Show an existing canvas surface on a TV. Use this when user asks to 'show latest', 'show previous', 'go back', or display an existing surface. Returns surface info, then you MUST call atv_cast_url to actually cast it to the TV.",
                     inputSchema={
                         "type": "object",
                         "properties": {

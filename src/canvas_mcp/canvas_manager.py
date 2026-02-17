@@ -252,23 +252,33 @@ class CanvasManager:
         if not state:
             raise ValueError(f"Surface not found: {surface_id}")
 
+        # Merge components by ID (add/update, don't replace entire list)
+        # This allows incremental updates across multiple canvas_update calls
+        existing_by_id = {c.get("id"): c for c in state.components if c.get("id")}
+        for comp in components:
+            comp_id = comp.get("id")
+            if comp_id:
+                existing_by_id[comp_id] = comp
+
+        merged_components = list(existing_by_id.values())
+
         # Auto-wrap components in a root Column if no root component provided
         # This is required for the receiver to render content
-        components = self._ensure_root_component(components)
+        merged_components = self._ensure_root_component(merged_components)
 
-        state.components = components
+        state.components = merged_components
         state.updated_at = datetime.now()
 
         await self._persist_surface(surface_id)
 
-        # Notify connected clients
+        # Notify connected clients with the full merged component list
         message = {
             "type": "updateComponents",
-            "components": components,
+            "components": merged_components,
         }
         await self._broadcast_to_surface(surface_id, message)
 
-        logger.debug(f"Updated components on surface {surface_id}: {len(components)} components")
+        logger.debug(f"Updated components on surface {surface_id}: {len(merged_components)} components (added/updated {len(components)})")
         return True
 
     async def update_data_model(
