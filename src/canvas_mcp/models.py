@@ -61,37 +61,6 @@ class CanvasSize(BaseModel):
         return f"{self.height}px" if self.height else "100%"
 
 
-class A2UIMessageType(str, Enum):
-    """A2UI message types (server to client)."""
-    CREATE_SURFACE = "createSurface"
-    UPDATE_COMPONENTS = "updateComponents"
-    UPDATE_DATA_MODEL = "updateDataModel"
-    DELETE_SURFACE = "deleteSurface"
-
-
-class A2UIComponent(BaseModel):
-    """A single A2UI component."""
-    id: str
-    component: str
-    children: list[str] | None = None
-    text: str | None = None
-    style: dict[str, Any] | None = None
-    # Allow additional properties for component-specific attributes
-    model_config = {"extra": "allow"}
-
-
-class A2UIMessage(BaseModel):
-    """A2UI protocol message."""
-    type: A2UIMessageType
-    surface_id: str | None = Field(None, alias="surfaceId")
-    catalog_id: str | None = Field(None, alias="catalogId")
-    components: list[A2UIComponent] | None = None
-    path: str | None = None  # JSON Pointer for updateDataModel
-    value: Any | None = None  # Value for updateDataModel
-
-    model_config = {"populate_by_name": True}
-
-
 class SurfaceState(BaseModel):
     """Persisted state of a canvas surface."""
     surface_id: str
@@ -102,21 +71,6 @@ class SurfaceState(BaseModel):
     data_model: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
-
-    def to_create_message(self) -> dict[str, Any]:
-        """Generate createSurface A2UI message."""
-        return {
-            "type": "createSurface",
-            "surfaceId": self.surface_id,
-            "catalogId": "standard",
-        }
-
-    def to_components_message(self) -> dict[str, Any]:
-        """Generate updateComponents A2UI message."""
-        return {
-            "type": "updateComponents",
-            "components": self.components,
-        }
 
 
 class Surface(BaseModel):

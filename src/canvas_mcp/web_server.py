@@ -188,30 +188,37 @@ class CanvasWebServer:
         return ws
 
     def _generate_canvas_html(self, surface: "Surface") -> str:
-        """Generate HTML page for canvas rendering."""
+        """Generate HTML page for canvas rendering.
+
+        This is a thin shell: WebSocket connection + innerHTML updates.
+        All rendering is done server-side by renderer.py.
+        """
         from canvas_mcp.models import CanvasSizePreset
+        from canvas_mcp.renderer import render_components_to_html
 
         surface_id = surface.surface_id
         size = surface.size
 
         # Determine canvas container styles based on size configuration
         if size.preset == CanvasSizePreset.AUTO or (size.width is None and size.height is None):
-            # Auto mode: fill viewport
             canvas_width = "100%"
             canvas_height = "100%"
             canvas_max_width = "none"
             canvas_max_height = "none"
             body_display = "block"
         else:
-            # Fixed size: center in viewport with aspect ratio preservation
             canvas_width = f"{size.width}px"
             canvas_height = f"{size.height}px"
             canvas_max_width = "100vw"
             canvas_max_height = "100vh"
             body_display = "flex"
 
-        # Note: The JavaScript in the template constructs the WebSocket URL
-        # dynamically based on window.location for proper HTTPS/WSS handling
+        # Pre-render current content for initial page load (no flash of empty content)
+        state = self.canvas_manager.get_surface(surface_id)
+        initial_html = ""
+        if state and state.components:
+            initial_html = render_components_to_html(state.components, state.data_model)
+
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -219,104 +226,32 @@ class CanvasWebServer:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Canvas - {surface_id}</title>
     <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         html, body {{
-            width: 100%;
-            height: 100%;
-            background: #0d0d1a;
-            color: #ffffff;
+            width: 100%; height: 100%;
+            background: #0d0d1a; color: #ffffff;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
             overflow: hidden;
-            display: {body_display};
-            justify-content: center;
-            align-items: center;
+            display: {body_display}; justify-content: center; align-items: center;
         }}
         #canvas-container {{
-            width: {canvas_width};
-            height: {canvas_height};
-            max-width: {canvas_max_width};
-            max-height: {canvas_max_height};
-            background: #1a1a2e;
-            position: relative;
-            overflow: hidden;
+            width: {canvas_width}; height: {canvas_height};
+            max-width: {canvas_max_width}; max-height: {canvas_max_height};
+            background: #1a1a2e; position: relative; overflow: hidden;
         }}
-        #canvas-root {{
-            width: 100%;
-            height: 100%;
-            padding: 32px;
-            overflow: auto;
-        }}
+        #canvas-root {{ width: 100%; height: 100%; overflow: hidden; }}
         #status {{
-            position: absolute;
-            top: 16px;
-            right: 16px;
-            padding: 8px 16px;
-            border-radius: 4px;
-            font-size: 12px;
-            background: rgba(0, 0, 0, 0.5);
-            z-index: 1000;
+            position: absolute; top: 16px; right: 16px;
+            padding: 8px 16px; border-radius: 4px; font-size: 12px;
+            background: rgba(0,0,0,0.5); z-index: 1000;
         }}
-        #status.connected {{
-            color: #4ade80;
-        }}
-        #status.disconnected {{
-            color: #f87171;
-        }}
-        #status.connecting {{
-            color: #fbbf24;
-        }}
+        #status.connected {{ color: #4ade80; }}
+        #status.disconnected {{ color: #f87171; }}
+        #status.connecting {{ color: #fbbf24; }}
         #size-info {{
-            position: absolute;
-            bottom: 16px;
-            left: 16px;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 10px;
-            background: rgba(0, 0, 0, 0.5);
-            color: #666;
-            z-index: 1000;
-        }}
-
-        /* A2UI Component Styles */
-        .a2ui-column {{
-            display: flex;
-            flex-direction: column;
-        }}
-        .a2ui-row {{
-            display: flex;
-            flex-direction: row;
-        }}
-        .a2ui-card {{
-            background: #16213e;
-            border-radius: 12px;
-            padding: 24px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-        }}
-        .a2ui-text {{
-            line-height: 1.5;
-        }}
-        .a2ui-list {{
-            list-style: none;
-        }}
-        .a2ui-list-item {{
-            padding: 12px 0;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        }}
-        .a2ui-list-item:last-child {{
-            border-bottom: none;
-        }}
-        .a2ui-image {{
-            max-width: 100%;
-            border-radius: 8px;
-        }}
-        .a2ui-divider {{
-            height: 1px;
-            background: rgba(255, 255, 255, 0.2);
-            margin: 16px 0;
+            position: absolute; bottom: 16px; left: 16px;
+            padding: 4px 8px; border-radius: 4px; font-size: 10px;
+            background: rgba(0,0,0,0.5); color: #666; z-index: 1000;
         }}
     </style>
 </head>
@@ -324,238 +259,46 @@ class CanvasWebServer:
     <div id="canvas-container">
         <div id="status" class="connecting">Connecting...</div>
         <div id="size-info">{size.width or 'auto'}x{size.height or 'auto'} ({size.preset.value})</div>
-        <div id="canvas-root"></div>
+        <div id="canvas-root">{initial_html}</div>
     </div>
-
     <script>
-        // Canvas MCP Client-Side Renderer
-        (function() {{
-            const surfaceId = "{surface_id}";
-            const wsUrl = window.location.protocol === 'https:'
-                ? `wss://${{window.location.host}}/ws/{surface_id}`
-                : `ws://${{window.location.host}}/ws/{surface_id}`;
+    (function() {{
+        const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:')
+            + '//' + location.host + '/ws/{surface_id}';
+        const statusEl = document.getElementById('status');
+        const rootEl = document.getElementById('canvas-root');
+        let ws, reconnects = 0;
 
-            let ws = null;
-            let components = {{}};
-            let dataModel = {{}};
-            let reconnectAttempts = 0;
-            const maxReconnectAttempts = 10;
-            const reconnectDelay = 2000;
-
-            const statusEl = document.getElementById('status');
-            const rootEl = document.getElementById('canvas-root');
-
-            function connect() {{
-                statusEl.className = 'connecting';
-                statusEl.textContent = 'Connecting...';
-
-                ws = new WebSocket(wsUrl);
-
-                ws.onopen = () => {{
-                    console.log('WebSocket connected');
-                    statusEl.className = 'connected';
-                    statusEl.textContent = 'Connected';
-                    reconnectAttempts = 0;
-                }};
-
-                ws.onmessage = (event) => {{
-                    try {{
-                        const message = JSON.parse(event.data);
-                        handleMessage(message);
-                    }} catch (e) {{
-                        console.error('Failed to parse message:', e);
+        function connect() {{
+            statusEl.className = 'connecting';
+            statusEl.textContent = 'Connecting...';
+            ws = new WebSocket(wsUrl);
+            ws.onopen = () => {{
+                statusEl.className = 'connected';
+                statusEl.textContent = 'Connected';
+                reconnects = 0;
+            }};
+            ws.onmessage = (e) => {{
+                try {{
+                    const msg = JSON.parse(e.data);
+                    if (msg.type === 'html') {{
+                        rootEl.innerHTML = msg.html;
+                    }} else if (msg.type === 'deleteSurface') {{
+                        rootEl.innerHTML = '<div style="text-align:center;padding:48px"><h2>Canvas Closed</h2></div>';
                     }}
-                }};
-
-                ws.onclose = () => {{
-                    console.log('WebSocket disconnected');
-                    statusEl.className = 'disconnected';
-                    statusEl.textContent = 'Disconnected';
-
-                    // Attempt to reconnect
-                    if (reconnectAttempts < maxReconnectAttempts) {{
-                        reconnectAttempts++;
-                        setTimeout(connect, reconnectDelay);
-                    }}
-                }};
-
-                ws.onerror = (error) => {{
-                    console.error('WebSocket error:', error);
-                }};
-            }}
-
-            function handleMessage(message) {{
-                console.log('Received:', message.type);
-
-                switch (message.type) {{
-                    case 'createSurface':
-                        // Surface created, ready to receive components
-                        components = {{}};
-                        dataModel = {{}};
-                        break;
-
-                    case 'updateComponents':
-                        // Update component definitions
-                        if (message.components) {{
-                            message.components.forEach(comp => {{
-                                components[comp.id] = comp;
-                            }});
-                            render();
-                        }}
-                        break;
-
-                    case 'updateDataModel':
-                        // Update data at path
-                        if (message.path && message.value !== undefined) {{
-                            setValueAtPath(dataModel, message.path, message.value);
-                            render();
-                        }}
-                        break;
-
-                    case 'deleteSurface':
-                        // Surface deleted
-                        rootEl.innerHTML = '<div style="text-align:center;padding:48px;"><h2>Canvas Closed</h2></div>';
-                        break;
+                }} catch (err) {{
+                    console.error('Parse error:', err);
                 }}
-            }}
-
-            function setValueAtPath(obj, path, value) {{
-                const parts = path.replace(/^\\//, '').split('/');
-                let current = obj;
-
-                for (let i = 0; i < parts.length - 1; i++) {{
-                    if (!(parts[i] in current)) {{
-                        current[parts[i]] = {{}};
-                    }}
-                    current = current[parts[i]];
-                }}
-
-                current[parts[parts.length - 1]] = value;
-            }}
-
-            function render() {{
-                // Find root component
-                const root = components['root'];
-                if (!root) {{
-                    return;
-                }}
-
-                rootEl.innerHTML = '';
-                const el = renderComponent(root);
-                if (el) {{
-                    rootEl.appendChild(el);
-                }}
-            }}
-
-            function renderComponent(comp) {{
-                if (!comp) return null;
-
-                const el = document.createElement('div');
-                el.className = `a2ui-${{comp.component.toLowerCase()}}`;
-                el.id = `comp-${{comp.id}}`;
-
-                // Apply styles
-                if (comp.style) {{
-                    Object.entries(comp.style).forEach(([key, value]) => {{
-                        // Convert camelCase to kebab-case
-                        const cssKey = key.replace(/([A-Z])/g, '-$1').toLowerCase();
-                        el.style[key] = typeof value === 'number' ? `${{value}}px` : value;
-                    }});
-                }}
-
-                // Render based on component type
-                switch (comp.component) {{
-                    case 'Column':
-                    case 'Row':
-                    case 'Card':
-                        if (comp.children) {{
-                            comp.children.forEach(childId => {{
-                                const childComp = components[childId];
-                                if (childComp) {{
-                                    const childEl = renderComponent(childComp);
-                                    if (childEl) el.appendChild(childEl);
-                                }}
-                            }});
-                        }}
-                        break;
-
-                    case 'Text':
-                        el.textContent = resolveValue(comp.text || '');
-                        break;
-
-                    case 'Image':
-                        const img = document.createElement('img');
-                        img.src = resolveValue(comp.src || '');
-                        img.alt = comp.alt || '';
-                        img.className = 'a2ui-image';
-                        el.appendChild(img);
-                        break;
-
-                    case 'List':
-                        const ul = document.createElement('ul');
-                        ul.className = 'a2ui-list';
-                        if (comp.children) {{
-                            comp.children.forEach(childId => {{
-                                const li = document.createElement('li');
-                                li.className = 'a2ui-list-item';
-                                const childComp = components[childId];
-                                if (childComp) {{
-                                    const childEl = renderComponent(childComp);
-                                    if (childEl) li.appendChild(childEl);
-                                }}
-                                ul.appendChild(li);
-                            }});
-                        }}
-                        el.appendChild(ul);
-                        break;
-
-                    case 'Divider':
-                        // Already styled via CSS
-                        break;
-
-                    default:
-                        // Generic container
-                        if (comp.children) {{
-                            comp.children.forEach(childId => {{
-                                const childComp = components[childId];
-                                if (childComp) {{
-                                    const childEl = renderComponent(childComp);
-                                    if (childEl) el.appendChild(childEl);
-                                }}
-                            }});
-                        }}
-                        if (comp.text) {{
-                            el.textContent = resolveValue(comp.text);
-                        }}
-                }}
-
-                return el;
-            }}
-
-            function resolveValue(value) {{
-                // Data binding: replace all {{/path/to/data}} occurrences in the string
-                if (typeof value !== 'string') return value;
-                return value.replace(/\\{{\\{{([^}}]+)\\}}\\}}/g, (match, path) => {{
-                    const resolved = getValueAtPath(dataModel, path);
-                    return resolved !== undefined ? resolved : match;
-                }});
-            }}
-
-            function getValueAtPath(obj, path) {{
-                const parts = path.replace(/^\\//, '').split('/');
-                let current = obj;
-
-                for (const part of parts) {{
-                    if (current === undefined || current === null) return undefined;
-                    current = current[part];
-                }}
-
-                return current;
-            }}
-
-            // Start connection
-            connect();
-        }})();
+            }};
+            ws.onclose = () => {{
+                statusEl.className = 'disconnected';
+                statusEl.textContent = 'Disconnected';
+                if (reconnects < 10) {{ reconnects++; setTimeout(connect, 2000); }}
+            }};
+            ws.onerror = (err) => console.error('WS error:', err);
+        }}
+        connect();
+    }})();
     </script>
 </body>
 </html>"""

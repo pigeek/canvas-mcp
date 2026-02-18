@@ -11,6 +11,149 @@ import aiofiles
 from loguru import logger
 
 from canvas_mcp.models import CanvasConfig, CanvasSize, CanvasSizePreset, Surface, SurfaceState
+from canvas_mcp.renderer import render_components_to_html
+
+
+# Valid A2UI component names (PascalCase)
+VALID_COMPONENTS = {
+    # Layout
+    "Column", "Row", "Grid", "Box", "Card", "Spacer", "Divider",
+    # Content
+    "Text", "Image", "Icon", "Avatar",
+    # Data display
+    "List", "Table", "Progress", "ProgressBar", "Badge",
+    # Feedback
+    "Spinner",
+}
+
+# Common component name mistakes and their corrections
+COMPONENT_ALIASES = {
+    # Lowercase versions
+    "column": "Column",
+    "row": "Row",
+    "grid": "Grid",
+    "box": "Box",
+    "card": "Card",
+    "spacer": "Spacer",
+    "divider": "Divider",
+    "text": "Text",
+    "image": "Image",
+    "icon": "Icon",
+    "avatar": "Avatar",
+    "list": "List",
+    "table": "Table",
+    "progress": "Progress",
+    "progressbar": "ProgressBar",
+    "badge": "Badge",
+    "spinner": "Spinner",
+    # Common mistakes
+    "rectangle": "Box",
+    "rect": "Box",
+    "container": "Box",
+    "div": "Box",
+    "span": "Text",
+    "label": "Text",
+    "paragraph": "Text",
+    "p": "Text",
+    "img": "Image",
+    "picture": "Image",
+    "photo": "Image",
+    "vstack": "Column",
+    "hstack": "Row",
+    "flex": "Row",
+    "flexbox": "Row",
+    "stack": "Column",
+    "view": "Box",
+}
+
+
+def normalize_component(comp: dict[str, Any]) -> dict[str, Any]:
+    """
+    Normalize a component definition to fix common mistakes.
+
+    - Converts component names to PascalCase (e.g., "text" -> "Text")
+    - Maps aliases to correct names (e.g., "rectangle" -> "Box")
+    - Converts "props" to "style"
+    - Logs warnings for unrecognized components
+
+    Args:
+        comp: Component definition dict
+
+    Returns:
+        Normalized component dict
+    """
+    normalized = comp.copy()
+
+    # Normalize component name
+    component_name = comp.get("component", "")
+    if component_name:
+        # Check if it's an alias or lowercase version
+        lower_name = component_name.lower()
+        if lower_name in COMPONENT_ALIASES:
+            correct_name = COMPONENT_ALIASES[lower_name]
+            if component_name != correct_name:
+                logger.warning(
+                    f"Component name normalized: '{component_name}' -> '{correct_name}'"
+                )
+            normalized["component"] = correct_name
+        elif component_name not in VALID_COMPONENTS:
+            # Unknown component - try PascalCase conversion
+            pascal_name = component_name[0].upper() + component_name[1:] if component_name else ""
+            if pascal_name in VALID_COMPONENTS:
+                logger.warning(
+                    f"Component name normalized: '{component_name}' -> '{pascal_name}'"
+                )
+                normalized["component"] = pascal_name
+            else:
+                logger.error(
+                    f"Unknown component type: '{component_name}'. "
+                    f"Valid types: {', '.join(sorted(VALID_COMPONENTS))}"
+                )
+
+    # Convert "props" to "style"
+    if "props" in normalized and "style" not in normalized:
+        logger.warning(
+            f"Component '{comp.get('id', 'unknown')}': 'props' converted to 'style'"
+        )
+        normalized["style"] = normalized.pop("props")
+
+    return normalized
+
+
+def validate_components(components: list[dict[str, Any]]) -> list[str]:
+    """
+    Validate components and return list of warnings/errors.
+
+    Args:
+        components: List of component definitions
+
+    Returns:
+        List of warning/error messages
+    """
+    warnings = []
+
+    for comp in components:
+        comp_id = comp.get("id", "unknown")
+        comp_type = comp.get("component", "")
+
+        # Check for missing required fields
+        if not comp.get("id"):
+            warnings.append(f"Component missing 'id' field")
+
+        if not comp_type:
+            warnings.append(f"Component '{comp_id}' missing 'component' field")
+        elif comp_type not in VALID_COMPONENTS:
+            warnings.append(
+                f"Component '{comp_id}' has invalid type '{comp_type}'"
+            )
+
+        # Check for common mistakes
+        if "props" in comp:
+            warnings.append(
+                f"Component '{comp_id}' uses 'props' instead of 'style'"
+            )
+
+    return warnings
 
 
 def get_local_ip() -> str:
@@ -252,10 +395,18 @@ class CanvasManager:
         if not state:
             raise ValueError(f"Surface not found: {surface_id}")
 
+        # Normalize components (fix common mistakes)
+        normalized_components = [normalize_component(comp) for comp in components]
+
+        # Validate and log any issues
+        warnings = validate_components(normalized_components)
+        for warning in warnings:
+            logger.warning(f"Component validation: {warning}")
+
         # Merge components by ID (add/update, don't replace entire list)
         # This allows incremental updates across multiple canvas_update calls
         existing_by_id = {c.get("id"): c for c in state.components if c.get("id")}
-        for comp in components:
+        for comp in normalized_components:
             comp_id = comp.get("id")
             if comp_id:
                 existing_by_id[comp_id] = comp
@@ -271,11 +422,9 @@ class CanvasManager:
 
         await self._persist_surface(surface_id)
 
-        # Notify connected clients with the full merged component list
-        message = {
-            "type": "updateComponents",
-            "components": merged_components,
-        }
+        # Render HTML and broadcast to connected clients
+        html = render_components_to_html(merged_components, state.data_model)
+        message = {"type": "html", "html": html}
         await self._broadcast_to_surface(surface_id, message)
 
         logger.debug(f"Updated components on surface {surface_id}: {len(merged_components)} components (added/updated {len(components)})")
@@ -305,13 +454,11 @@ class CanvasManager:
 
         await self._persist_surface(surface_id)
 
-        # Notify connected clients
-        message = {
-            "type": "updateDataModel",
-            "path": path,
-            "value": value,
-        }
-        await self._broadcast_to_surface(surface_id, message)
+        # Re-render with updated data model and broadcast HTML
+        if state.components:
+            html = render_components_to_html(state.components, state.data_model)
+            message = {"type": "html", "html": html}
+            await self._broadcast_to_surface(surface_id, message)
 
         logger.debug(f"Updated data model on surface {surface_id}: {path}")
         return True
@@ -573,21 +720,10 @@ class CanvasManager:
         if not state:
             return
 
-        # Send createSurface message
-        await ws.send_str(json.dumps(state.to_create_message()))
-
-        # Send current components if any
+        # Send rendered HTML (components + data model resolved together)
         if state.components:
-            await ws.send_str(json.dumps(state.to_components_message()))
-
-        # Send data model updates
-        if state.data_model:
-            for path, value in self._flatten_data_model(state.data_model):
-                await ws.send_str(json.dumps({
-                    "type": "updateDataModel",
-                    "path": path,
-                    "value": value,
-                }))
+            html = render_components_to_html(state.components, state.data_model)
+            await ws.send_str(json.dumps({"type": "html", "html": html}))
 
     def _ensure_root_component(
         self, components: list[dict[str, Any]]
@@ -627,15 +763,3 @@ class CanvasManager:
         logger.debug(f"Auto-wrapped {len(components)} components in root Column")
         return [root_component] + components
 
-    def _flatten_data_model(
-        self, obj: dict, prefix: str = ""
-    ) -> list[tuple[str, Any]]:
-        """Flatten a nested dict into JSON Pointer paths and values."""
-        result = []
-        for key, value in obj.items():
-            path = f"{prefix}/{key}"
-            if isinstance(value, dict):
-                result.extend(self._flatten_data_model(value, path))
-            else:
-                result.append((path, value))
-        return result

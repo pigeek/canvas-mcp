@@ -3,13 +3,12 @@
 __version__ = "0.1.0"
 
 from canvas_mcp.canvas_manager import CanvasManager
-from canvas_mcp.models import A2UIMessage, Surface, SurfaceState
+from canvas_mcp.models import Surface, SurfaceState
 from canvas_mcp.server import CanvasMCPServer
 
 __all__ = [
     "CanvasManager",
     "CanvasMCPServer",
     "Surface",
-    "A2UIMessage",
     "SurfaceState",
 ]
